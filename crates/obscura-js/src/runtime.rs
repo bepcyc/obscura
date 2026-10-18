@@ -4752,7 +4752,7 @@ mod tests {
         rt.set_fingerprint_pin(Some((1920, 1080)), Some(8), Some(8.0));
         rt.run_page_init();
         assert_eq!(rt.evaluate("screen.width + 'x' + screen.height").unwrap(), serde_json::json!("1920x1080"));
-        assert_eq!(rt.evaluate("navigator.hardwareConcurrency").unwrap(), serde_json::json!(8));
+        assert_eq!(rt.evaluate("navigator.hardwareConcurrency").unwrap(), serde_json::json!(8.0));
         assert_eq!(rt.evaluate("navigator.deviceMemory").unwrap(), serde_json::json!(8.0));
     }
 
