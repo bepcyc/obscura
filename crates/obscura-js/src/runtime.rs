@@ -953,12 +953,13 @@ impl ObscuraJsRuntime {
     ) {
         use deno_core::v8;
 
-        const IDENTITY_GLOBALS: [&str; 7] = [
+        const IDENTITY_GLOBALS: [&str; 8] = [
             "__obscura_ua",
             "__obscura_platform",
             "__obscura_ua_platform",
             "__obscura_ua_platform_version",
             "__obscura_stealth",
+            "__obscura_pin",
             "__obscura_geo_lat",
             "__obscura_geo_lon",
         ];
@@ -1523,6 +1524,17 @@ impl ObscuraJsRuntime {
                 js_string_literal(ua_platform_version),
             ),
         );
+    }
+
+    /// Pin the parts of the stealth fingerprint that are otherwise drawn at random per page: the screen size,
+    /// `navigator.hardwareConcurrency` and `navigator.deviceMemory`. `None` keeps the random draw.
+    pub fn set_fingerprint_pin(&mut self, screen: Option<(u32, u32)>, cores: Option<u32>, memory_gb: Option<f64>) {
+        let pin = serde_json::json!({
+            "screen": screen.map(|(w, h)| vec![w, h]),
+            "hw": cores,
+            "mem": memory_gb,
+        });
+        let _ = self.execute_runtime_script("<set-fingerprint-pin>", format!("globalThis.__obscura_pin = {pin};"));
     }
 
     pub fn set_stealth(&mut self, enabled: bool) {

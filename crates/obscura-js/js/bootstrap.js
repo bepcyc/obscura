@@ -18216,7 +18216,8 @@ globalThis.__obscura_init = function() {
   _registerWindowNamedTree(globalThis.document.documentElement);
   _reconcileWindowNamedProperties(previousWindowNames);
 
-  const scr = _fp('screen');
+  const _pin = globalThis.__obscura_pin || {};
+  const scr = (Array.isArray(_pin.screen) && _pin.screen[0] > 0 && _pin.screen[1] > 0) ? _pin.screen : _fp('screen');
   const sw = Number.isFinite(globalThis.__obscura_screen_w) && globalThis.__obscura_screen_w > 0
     ? globalThis.__obscura_screen_w : scr[0];
   const sh = Number.isFinite(globalThis.__obscura_screen_h) && globalThis.__obscura_screen_h > 0
@@ -18239,9 +18240,9 @@ globalThis.__obscura_init = function() {
   globalThis.outerWidth = sw; globalThis.outerHeight = sh - 40;
 
   var hwValues = globalThis.__obscura_stealth ? [4, 6, 8, 12, 16] : [2, 4, 6, 8, 12, 16];
-  globalThis.__obscura_hw = hwValues[Math.floor(_fpRand(400) * hwValues.length)];
+  globalThis.__obscura_hw = (_pin.hw > 0) ? _pin.hw : hwValues[Math.floor(_fpRand(400) * hwValues.length)];
   var memValues = globalThis.__obscura_stealth ? [4, 8] : [0.25, 0.5, 1, 2, 4, 8];
-  globalThis.__obscura_mem = memValues[Math.floor(_fpRand(401) * memValues.length)];
+  globalThis.__obscura_mem = (_pin.mem > 0) ? _pin.mem : memValues[Math.floor(_fpRand(401) * memValues.length)];
 
   const timing = {};
   for (const name of Object.keys(JSON.parse(_dom('performance_timing')))) {
