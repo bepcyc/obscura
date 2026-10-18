@@ -4741,6 +4741,21 @@ mod tests {
         rt
     }
 
+    /// `set_fingerprint_pin` must reach the page: the screen, `hardwareConcurrency` and `deviceMemory` the page sees are
+    /// the pinned ones, not a random draw (a unit test of the parser alone does not prove this).
+    #[test]
+    fn a_pinned_fingerprint_is_what_the_page_reports() {
+        let mut rt = ObscuraJsRuntime::new();
+        rt.set_dom(parse_html("<html><body></body></html>"));
+        rt.set_url("http://example.com/test");
+        rt.set_stealth(true);
+        rt.set_fingerprint_pin(Some((1920, 1080)), Some(8), Some(8.0));
+        rt.run_page_init();
+        assert_eq!(rt.evaluate("screen.width + 'x' + screen.height").unwrap(), serde_json::json!("1920x1080"));
+        assert_eq!(rt.evaluate("navigator.hardwareConcurrency").unwrap(), serde_json::json!(8));
+        assert_eq!(rt.evaluate("navigator.deviceMemory").unwrap(), serde_json::json!(8.0));
+    }
+
     #[cfg(feature = "render")]
     #[test]
     fn static_accessibility_visibility_does_not_allocate_geometry() {
