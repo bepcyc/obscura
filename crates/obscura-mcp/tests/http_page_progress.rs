@@ -48,7 +48,7 @@ async fn page_callbacks_progress_without_more_http_tool_calls() {
     });
     let local = LocalSet::new();
     let server = local.spawn_local(obscura_mcp::http::run(
-        "127.0.0.1".into(), port, None, None, false,
+        "127.0.0.1".into(), port, None, None, false, obscura_net::StealthPlatform::host(),
     ));
     local.run_until(async {
         for _ in 0..100 {

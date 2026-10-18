@@ -4989,6 +4989,7 @@ mod tests {
             std::sync::Arc::new(obscura_net::CookieJar::new()),
             None,
             true,
+            obscura_net::StealthPlatform::Windows,
             ),
         ));
         assert!(rt.has_page_transport());
@@ -21449,7 +21450,7 @@ mod tests {
         rt.set_http_client(client.clone());
         #[cfg(feature = "stealth")]
         rt.set_stealth_client(std::sync::Arc::new(obscura_net::StealthHttpClient::with_proxy(
-            client.cookie_jar.clone(), None, true,
+            client.cookie_jar.clone(), None, true, obscura_net::StealthPlatform::Windows,
         )));
         rt.execute_script("start-abort-fetch", &format!(r#"
             globalThis.abortController = new AbortController();
@@ -21515,7 +21516,7 @@ mod tests {
         ));
         #[cfg(feature = "stealth")]
         rt.set_stealth_client(std::sync::Arc::new(
-            obscura_net::StealthHttpClient::with_proxy(cookie_jar, None, true),
+            obscura_net::StealthHttpClient::with_proxy(cookie_jar, None, true, obscura_net::StealthPlatform::Windows),
         ));
         rt.execute_script("header-first-fetch", &format!(
             "globalThis.headerResponse = null; fetch({target:?}).then(r => headerResponse = r);"

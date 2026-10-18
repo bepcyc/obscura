@@ -4,6 +4,7 @@ pub mod encoding;
 pub mod interceptor;
 pub mod robots;
 pub mod blocklist;
+pub mod stealth_platform;
 #[cfg(feature = "stealth")]
 pub mod wreq_client;
 
@@ -21,11 +22,9 @@ pub use encoding::{
 };
 pub use robots::RobotsCache;
 pub use blocklist::is_blocked as is_tracker_blocked;
+pub use stealth_platform::StealthPlatform;
 #[cfg(feature = "stealth")]
-pub use wreq_client::{
-    StealthHttpClient, STEALTH_NAVIGATOR_PLATFORM, STEALTH_UA_PLATFORM,
-    STEALTH_UA_PLATFORM_VERSION, STEALTH_USER_AGENT,
-};
+pub use wreq_client::StealthHttpClient;
 
 mod operator_hint;
 pub use operator_hint::private_network_error_hint;

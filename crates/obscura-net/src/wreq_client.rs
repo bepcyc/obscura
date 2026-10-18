@@ -13,7 +13,9 @@ use futures_util::StreamExt;
 use tokio::sync::RwLock;
 #[cfg(feature = "stealth")]
 use url::Url;
-
+#[cfg(feature = "stealth")]
+#[cfg(feature = "stealth")]
+use crate::stealth_platform::StealthPlatform;
 #[cfg(feature = "stealth")]
 use crate::client::{
     cors_required, env_allows_private_network, error_chain, fetch_file_url, is_forbidden_ip,
@@ -58,20 +60,6 @@ impl wreq::dns::Resolve for SsrfGuardResolver {
 }
 
 #[cfg(feature = "stealth")]
-pub const STEALTH_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
-
-// The wreq emulation (Profile::Chrome145, Platform::Windows) sends this exact
-// UA and sec-ch-ua-platform "Windows" on the wire. navigator has to report the
-// same identity, otherwise the TLS/HTTP layer and the JS layer disagree and a
-// site cross-checks the mismatch as a bot signal.
-#[cfg(feature = "stealth")]
-pub const STEALTH_NAVIGATOR_PLATFORM: &str = "Win32";
-#[cfg(feature = "stealth")]
-pub const STEALTH_UA_PLATFORM: &str = "Windows";
-#[cfg(feature = "stealth")]
-pub const STEALTH_UA_PLATFORM_VERSION: &str = "15.0.0";
-
 #[cfg(feature = "stealth")]
 fn tracker_blocking_enabled(value: Option<&str>) -> bool {
     !matches!(
@@ -204,17 +192,18 @@ pub struct StealthResponseHeaders {
 #[cfg(feature = "stealth")]
 impl StealthHttpClient {
     pub fn new(cookie_jar: Arc<CookieJar>) -> Self {
-        Self::with_proxy(cookie_jar, None, false)
+        Self::with_proxy(cookie_jar, None, false, StealthPlatform::host())
     }
 
     pub fn with_proxy(
         cookie_jar: Arc<CookieJar>,
         proxy_url: Option<&str>,
         allow_private_network: bool,
+        platform: StealthPlatform,
     ) -> Self {
         let emulation_opts = wreq_util::Emulation::builder()
             .profile(wreq_util::Profile::Chrome145)
-            .platform(wreq_util::Platform::Windows)
+            .platform(platform.wreq())
             .build();
 
         let mut builder = wreq::Client::builder()
@@ -611,6 +600,7 @@ mod tests {
     };
     use crate::client::{ObscuraNetError, SsrfGuardResolver};
     use crate::cookies::CookieJar;
+    use crate::stealth_platform::StealthPlatform;
     use wreq::dns::{Name, Resolve};
 
     // Mirrors client::ssrf_tests::resolver_blocks_hostname_that_resolves_to_loopback.
@@ -694,6 +684,7 @@ mod tests {
             Arc::new(CookieJar::new()),
             Some(&proxy),
             true,
+            StealthPlatform::Windows,
         );
         let url = Url::parse("http://www.google-analytics.com/collect").unwrap();
         let headers = std::collections::HashMap::new();
@@ -855,7 +846,7 @@ mod tests {
             let _ = stream.write_all(response.as_bytes()).await;
             let _ = stream.shutdown().await;
         });
-        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true);
+        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true, StealthPlatform::Windows);
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
 
         let resp = client
@@ -876,7 +867,7 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true);
+        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true, StealthPlatform::Windows);
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let message = client.fetch(&url).await.expect_err("nothing listens").to_string();
         assert!(message.to_lowercase().contains("refused"), "{message}");
@@ -912,7 +903,7 @@ mod tests {
     #[tokio::test]
     async fn stealth_client_decodes_gzip_response() {
         let port = gzip_fixture().await;
-        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true);
+        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true, StealthPlatform::Windows);
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
 
         let resp = client.fetch(&url).await.expect("fixture must be reachable");
@@ -929,7 +920,8 @@ mod tests {
     #[tokio::test]
     async fn stealth_client_honors_allow_private_network_for_loopback_hostnames() {
         let port = gzip_fixture().await;
-        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true);
+        let client =
+            StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true, StealthPlatform::Windows);
         let url = Url::parse(&format!("http://localhost:{port}/")).unwrap();
 
         let resp = client

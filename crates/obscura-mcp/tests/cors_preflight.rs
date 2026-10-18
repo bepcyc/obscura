@@ -24,7 +24,15 @@ async fn browser_preflight_is_denied_without_an_origin_allowlist() {
     // end of the test. `current_thread` + LocalSet is required because the
     // browser state is `!Send` (Page holds V8 handles).
     let server = local.spawn_local(async move {
-        let _ = obscura_mcp::http::run("127.0.0.1".to_string(), port, None, None, false).await;
+        let _ = obscura_mcp::http::run(
+            "127.0.0.1".to_string(),
+            port,
+            None,
+            None,
+            false,
+            obscura_net::StealthPlatform::host(),
+        )
+        .await;
     });
 
     local.run_until(async {
@@ -74,7 +82,15 @@ async fn oversized_content_length_is_rejected() {
     let local = LocalSet::new();
 
     let server = local.spawn_local(async move {
-        let _ = obscura_mcp::http::run("127.0.0.1".to_string(), port, None, None, false).await;
+        let _ = obscura_mcp::http::run(
+            "127.0.0.1".to_string(),
+            port,
+            None,
+            None,
+            false,
+            obscura_net::StealthPlatform::host(),
+        )
+        .await;
     });
 
     local
