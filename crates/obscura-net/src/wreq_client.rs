@@ -202,7 +202,7 @@ impl StealthHttpClient {
         platform: StealthPlatform,
     ) -> Self {
         let emulation_opts = wreq_util::Emulation::builder()
-            .profile(wreq_util::Profile::Chrome145)
+            .profile(wreq_util::Profile::Chrome148)
             .platform(platform.wreq())
             .build();
 

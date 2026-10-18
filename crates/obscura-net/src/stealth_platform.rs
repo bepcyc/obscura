@@ -29,22 +29,22 @@ impl StealthPlatform {
         }
     }
 
-    /// The User-Agent header of the identity. Pinned to Chrome 145 to match
-    /// the wreq emulation profile (`Profile::Chrome145`); keep in lockstep
+    /// The User-Agent header of the identity. Pinned to Chrome 148 to match
+    /// the wreq emulation profile (`Profile::Chrome148`); keep in lockstep
     /// when that profile bumps.
     pub const fn user_agent(self) -> &'static str {
         match self {
             Self::Windows => {
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
-                 Chrome/145.0.0.0 Safari/537.36"
+                 Chrome/148.0.0.0 Safari/537.36"
             }
             Self::MacOS => {
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) \
-                 Chrome/145.0.0.0 Safari/537.36"
+                 Chrome/148.0.0.0 Safari/537.36"
             }
             Self::Linux => {
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-                 Chrome/145.0.0.0 Safari/537.36"
+                 Chrome/148.0.0.0 Safari/537.36"
             }
         }
     }
@@ -107,6 +107,18 @@ impl std::str::FromStr for StealthPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wire identity is one Chrome major: the wreq emulation profile, the User-Agent strings and the
+    /// navigator text must not drift apart (a mismatch is a bot signal). Bump all of them together.
+    #[test]
+    fn the_chrome_major_is_the_same_in_every_identity_string() {
+        for p in [StealthPlatform::Windows, StealthPlatform::MacOS, StealthPlatform::Linux] {
+            assert!(p.user_agent().contains("Chrome/148.0.0.0"), "{:?}", p);
+        }
+        let wreq = include_str!("wreq_client.rs");
+        assert!(wreq.contains("Profile::Chrome148"));
+        assert!(!wreq.contains("Profile::Chrome145"));
+    }
 
     #[test]
     fn host_is_a_valid_platform() {

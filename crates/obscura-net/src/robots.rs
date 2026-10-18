@@ -204,7 +204,7 @@ mod tests {
         // RFC 9309 2.2.1: a group applies when its product token equals one of
         // ours. Substring matching in either direction let "User-agent: Moz"
         // govern a Mozilla/5.0 UA and "User-agent: ObscuraBot" govern "Obscura".
-        let chrome = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+        let chrome = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
         let cache = RobotsCache::new();
         cache.parse_and_store("a.test", "User-agent: Moz\nDisallow: /\n", chrome);
         assert!(cache.is_allowed("a.test", "/page"), "a token prefix is not a match");
