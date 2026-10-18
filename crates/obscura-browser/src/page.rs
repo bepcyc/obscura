@@ -1824,6 +1824,8 @@ impl Page {
         #[cfg(feature = "stealth")]
         if self.stealth_client.is_some() {
             rt.set_stealth(true);
+            let (screen, cores, memory) = fingerprint_pin_from_env(|k| std::env::var(k).ok());
+            rt.set_fingerprint_pin(screen, cores, memory);
             rt.set_user_agent(obscura_net::STEALTH_USER_AGENT);
             rt.set_platform(
                 obscura_net::STEALTH_NAVIGATOR_PLATFORM,
@@ -10993,4 +10995,38 @@ fn response_body_byte_limit() -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2 * 1024 * 1024)
+}
+
+/// `OBSCURA_FP_SCREEN=1280x800`, `OBSCURA_FP_CORES=8`, `OBSCURA_FP_MEMORY=8`: pin the stealth fingerprint values
+/// that are otherwise random per page, so a second client of the same site can present the same desktop.
+/// Anything missing or malformed keeps the random draw.
+pub fn fingerprint_pin_from_env(get: impl Fn(&str) -> Option<String>) -> (Option<(u32, u32)>, Option<u32>, Option<f64>) {
+    let screen = get("OBSCURA_FP_SCREEN").and_then(|v| {
+        let (w, h) = v.trim().to_ascii_lowercase().split_once('x').map(|(a, b)| (a.to_string(), b.to_string()))?;
+        match (w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?) {
+            (w, h) if (320..=7680).contains(&w) && (240..=4320).contains(&h) => Some((w, h)),
+            _ => None,
+        }
+    });
+    let cores = get("OBSCURA_FP_CORES").and_then(|v| v.trim().parse::<u32>().ok()).filter(|c| (1..=128).contains(c));
+    let memory = get("OBSCURA_FP_MEMORY").and_then(|v| v.trim().parse::<f64>().ok()).filter(|m| *m > 0.0 && *m <= 64.0);
+    (screen, cores, memory)
+}
+
+#[cfg(test)]
+mod fingerprint_pin_tests {
+    use super::fingerprint_pin_from_env;
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+    }
+
+    #[test]
+    fn a_valid_pin_is_read_and_a_bad_one_keeps_the_random_draw() {
+        let ok = fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", "1280x800"), ("OBSCURA_FP_CORES", "8"), ("OBSCURA_FP_MEMORY", "8")]));
+        assert_eq!(ok, (Some((1280, 800)), Some(8), Some(8.0)));
+        let bad = fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", "wide"), ("OBSCURA_FP_CORES", "0"), ("OBSCURA_FP_MEMORY", "-1")]));
+        assert_eq!(bad, (None, None, None));
+        assert_eq!(fingerprint_pin_from_env(env(&[])), (None, None, None));
+    }
 }
