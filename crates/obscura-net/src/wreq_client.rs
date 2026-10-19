@@ -13,7 +13,9 @@ use futures_util::StreamExt;
 use tokio::sync::RwLock;
 #[cfg(feature = "stealth")]
 use url::Url;
-
+#[cfg(feature = "stealth")]
+#[cfg(feature = "stealth")]
+use crate::stealth_platform::StealthPlatform;
 #[cfg(feature = "stealth")]
 use crate::client::{
     cors_required, env_allows_private_network, error_chain, fetch_file_url, is_forbidden_ip,
@@ -58,20 +60,6 @@ impl wreq::dns::Resolve for SsrfGuardResolver {
 }
 
 #[cfg(feature = "stealth")]
-pub const STEALTH_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
-
-// The wreq emulation (Profile::Chrome145, Platform::Windows) sends this exact
-// UA and sec-ch-ua-platform "Windows" on the wire. navigator has to report the
-// same identity, otherwise the TLS/HTTP layer and the JS layer disagree and a
-// site cross-checks the mismatch as a bot signal.
-#[cfg(feature = "stealth")]
-pub const STEALTH_NAVIGATOR_PLATFORM: &str = "Win32";
-#[cfg(feature = "stealth")]
-pub const STEALTH_UA_PLATFORM: &str = "Windows";
-#[cfg(feature = "stealth")]
-pub const STEALTH_UA_PLATFORM_VERSION: &str = "15.0.0";
-
 #[cfg(feature = "stealth")]
 fn tracker_blocking_enabled(value: Option<&str>) -> bool {
     !matches!(
@@ -204,17 +192,18 @@ pub struct StealthResponseHeaders {
 #[cfg(feature = "stealth")]
 impl StealthHttpClient {
     pub fn new(cookie_jar: Arc<CookieJar>) -> Self {
-        Self::with_proxy(cookie_jar, None, false)
+        Self::with_proxy(cookie_jar, None, false, StealthPlatform::host())
     }
 
     pub fn with_proxy(
         cookie_jar: Arc<CookieJar>,
         proxy_url: Option<&str>,
         allow_private_network: bool,
+        platform: StealthPlatform,
     ) -> Self {
         let emulation_opts = wreq_util::Emulation::builder()
-            .profile(wreq_util::Profile::Chrome145)
-            .platform(wreq_util::Platform::Windows)
+            .profile(wreq_util::Profile::Chrome148)
+            .platform(platform.wreq())
             .build();
 
         let mut builder = wreq::Client::builder()
@@ -317,6 +306,28 @@ impl StealthHttpClient {
         request: ResourceRequest,
         callbacks: Option<&CallbackRegistry>,
     ) -> Result<Response, ObscuraNetError> {
+        self.fetch_with_method(url, request, callbacks, wreq::Method::GET, None).await
+    }
+
+    /// Form navigation uses the same TLS profile, cookies and redirect policy as GET.
+    pub async fn post_form_with_callbacks(
+        &self,
+        url: &Url,
+        body: &str,
+        callbacks: Option<&CallbackRegistry>,
+    ) -> Result<Response, ObscuraNetError> {
+        self.fetch_with_method(url, ResourceRequest::navigation(), callbacks,
+            wreq::Method::POST, Some(body.as_bytes().to_vec())).await
+    }
+
+    async fn fetch_with_method(
+        &self,
+        url: &Url,
+        request: ResourceRequest,
+        callbacks: Option<&CallbackRegistry>,
+        mut method: wreq::Method,
+        mut body: Option<Vec<u8>>,
+    ) -> Result<Response, ObscuraNetError> {
         validate_url(url, self.allow_private_network)?;
         validate_request_mode(&request, url)?;
         if url.scheme() == "file" {
@@ -344,7 +355,11 @@ impl StealthHttpClient {
         // 21 requests, so the 20th hop is followed and only the 21st fails.
         for _ in 0..=20 {
             validate_request_mode(&request, &current_url)?;
-            let mut req = self.client.get(current_url.as_str());
+            let mut req = self.client.request(method.clone(), current_url.as_str());
+            if let Some(body) = &body {
+                req = req.header("content-type", "application/x-www-form-urlencoded")
+                    .body(body.clone());
+            }
 
             req = req
                 .header("accept", request.accept())
@@ -389,7 +404,7 @@ impl StealthHttpClient {
 
             let request_info = RequestInfo {
                 url: current_url.clone(),
-                method: "GET".to_string(),
+                method: method.as_str().to_string(),
                 headers: self.extra_headers.read().await.clone(),
                 resource_type: request.resource_type,
             };
@@ -401,9 +416,13 @@ impl StealthHttpClient {
             }
 
             let in_flight = InFlightGuard::new(&self.in_flight);
-            let resp = send_get_with_connection_reset_retry(req, &current_url)
-                .await
-                .map_err(|e| {
+            let result = if method == wreq::Method::GET {
+                send_get_with_connection_reset_retry(req, &current_url).await
+            } else {
+                // A reset must not replay a possibly committed form submission.
+                req.send().await
+            };
+            let resp = result.map_err(|e| {
                     ObscuraNetError::Network(format!("{}: {}", current_url, error_chain(&e)))
                 })?;
 
@@ -444,6 +463,11 @@ impl StealthHttpClient {
                     validate_request_mode(&request, &next_url)?;
                     redirect_tainted |=
                         redirect_taints_origin(&request, &current_url, &next_url);
+                    if status.as_u16() == 303 ||
+                        (matches!(status.as_u16(), 301 | 302) && method == wreq::Method::POST) {
+                        method = wreq::Method::GET;
+                        body = None;
+                    }
                     redirects.push(current_url.clone());
                     current_url = next_url;
                     continue;
@@ -468,6 +492,39 @@ impl StealthHttpClient {
         }
 
         Err(ObscuraNetError::TooManyRedirects(url.to_string()))
+    }
+
+    /// Preflights use the native identity without credentials, cookie storage,
+    /// or redirect following. Keep repeated response headers for CORS validation.
+    pub async fn send_preflight(
+        &self,
+        url: &Url,
+        headers: &HashMap<String, String>,
+        timeout: Duration,
+    ) -> Result<(wreq::StatusCode, wreq::header::HeaderMap), ObscuraNetError> {
+        validate_url(url, self.allow_private_network)?;
+        if url.host_str().is_some_and(crate::blocklist::is_blocked) {
+            return Err(ObscuraNetError::Network("Blocked tracker preflight".to_string()));
+        }
+        let mut request = self.client.request(wreq::Method::OPTIONS, url.as_str()).timeout(timeout);
+        // A configured browser identity still applies. Extra application
+        // headers, especially Cookie/Authorization, do not belong on OPTIONS.
+        for (name, value) in self.extra_headers.read().await.iter() {
+            if name.eq_ignore_ascii_case("user-agent") {
+                request = request.header(name.as_str(), value.as_str());
+            }
+        }
+        for (name, value) in headers {
+            if ["origin", "access-control-request-method", "access-control-request-headers"]
+                .iter().any(|allowed| name.eq_ignore_ascii_case(allowed))
+            {
+                request = request.header(name.as_str(), value.as_str());
+            }
+        }
+        let _in_flight = InFlightGuard::new(&self.in_flight);
+        let response = request.send().await.map_err(|e|
+            ObscuraNetError::Network(format!("{}: {}", url, e)))?;
+        Ok((response.status(), response.headers().clone()))
     }
 
     /// One request with no redirect following, for scripted fetch()/XHR. The
@@ -611,6 +668,7 @@ mod tests {
     };
     use crate::client::{ObscuraNetError, SsrfGuardResolver};
     use crate::cookies::CookieJar;
+    use crate::stealth_platform::StealthPlatform;
     use wreq::dns::{Name, Resolve};
 
     // Mirrors client::ssrf_tests::resolver_blocks_hostname_that_resolves_to_loopback.
@@ -694,6 +752,7 @@ mod tests {
             Arc::new(CookieJar::new()),
             Some(&proxy),
             true,
+            StealthPlatform::Windows,
         );
         let url = Url::parse("http://www.google-analytics.com/collect").unwrap();
         let headers = std::collections::HashMap::new();
@@ -855,7 +914,7 @@ mod tests {
             let _ = stream.write_all(response.as_bytes()).await;
             let _ = stream.shutdown().await;
         });
-        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true);
+        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true, StealthPlatform::Windows);
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
 
         let resp = client
@@ -876,7 +935,7 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true);
+        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true, StealthPlatform::Windows);
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         let message = client.fetch(&url).await.expect_err("nothing listens").to_string();
         assert!(message.to_lowercase().contains("refused"), "{message}");
@@ -912,7 +971,7 @@ mod tests {
     #[tokio::test]
     async fn stealth_client_decodes_gzip_response() {
         let port = gzip_fixture().await;
-        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true);
+        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true, StealthPlatform::Windows);
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
 
         let resp = client.fetch(&url).await.expect("fixture must be reachable");
@@ -929,7 +988,8 @@ mod tests {
     #[tokio::test]
     async fn stealth_client_honors_allow_private_network_for_loopback_hostnames() {
         let port = gzip_fixture().await;
-        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true);
+        let client =
+            StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true, StealthPlatform::Windows);
         let url = Url::parse(&format!("http://localhost:{port}/")).unwrap();
 
         let resp = client
@@ -938,4 +998,101 @@ mod tests {
             .expect("loopback hostname must be reachable with the opt-in");
         assert_eq!(resp.status, 200);
     }
+    #[tokio::test]
+    async fn stealth_form_redirects_preserve_307_body_and_rewrite_303_with_cookies() {
+        for (status, expected_method, expected_body) in [(303, "GET", ""), (307, "POST", "a=1")] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let fixture = tokio::spawn(async move {
+                for hop in 0..2 {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    loop {
+                        let mut byte = [0];
+                        socket.read_exact(&mut byte).await.unwrap();
+                        request.push(byte[0]);
+                        if request.ends_with(b"\r\n\r\n") { break; }
+                    }
+                    let headers = String::from_utf8(request).unwrap();
+                    let size = headers.lines().filter_map(|line| line.split_once(':'))
+                        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                        .map(|(_, value)| value.trim().parse::<usize>().unwrap()).unwrap_or(0);
+                    let mut body = vec![0; size];
+                    socket.read_exact(&mut body).await.unwrap();
+                    if hop == 0 {
+                        assert!(headers.starts_with("POST /form "));
+                        assert_eq!(body, b"a=1");
+                        let response = format!("HTTP/1.1 {} Redirect\r\nLocation: /done\r\nSet-Cookie: auth=ok; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status);
+                        socket.write_all(response.as_bytes()).await.unwrap();
+                    } else {
+                        assert!(headers.starts_with(&format!("{} /done ", expected_method)));
+                        assert!(headers.to_lowercase().contains("cookie: auth=ok"));
+                        assert_eq!(body, expected_body.as_bytes());
+                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await.unwrap();
+                    }
+                }
+            });
+            let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true, StealthPlatform::Windows);
+            let response = client.post_form_with_callbacks(&Url::parse(&format!("http://{}/form", addr)).unwrap(), "a=1", None).await.unwrap();
+            assert_eq!(response.body, b"ok");
+            assert_eq!(response.redirected_from.len(), 1);
+            fixture.await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn stealth_form_navigation_does_not_retry_connection_reset() {
+        let (port, server) = reset_fixture(false);
+        let client = StealthHttpClient::with_proxy(Arc::new(CookieJar::new()), None, true, StealthPlatform::Windows);
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        assert!(client.post_form_with_callbacks(&url, "payload=once", None).await.is_err());
+        assert_eq!(server.join().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn stealth_preflight_preserves_repeated_headers_without_credentials_or_redirects() {
+        for status in [204, 307, 403] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = Url::parse(&format!("http://{}/preflight", listener.local_addr().unwrap())).unwrap();
+            let fixture = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    socket.read_exact(&mut byte).await.unwrap();
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap().to_lowercase();
+                assert!(request.starts_with("options /preflight "));
+                assert!(request.contains("origin: https://example.test"));
+                assert!(request.contains("access-control-request-method: put"));
+                assert!(request.contains("access-control-request-headers: x-probe"));
+                assert!(request.contains("user-agent: configured-browser"));
+                assert!(!request.contains("\r\ncookie:"));
+                assert!(!request.contains("authorization:"));
+                assert!(!request.contains("x-private:"));
+                socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nLocation: /must-not-follow\r\nAccess-Control-Allow-Methods: GET\r\nAccess-Control-Allow-Methods: PUT\r\nAccess-Control-Allow-Headers: X-First\r\nAccess-Control-Allow-Headers: X-Probe\r\nSet-Cookie: forbidden=1; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            });
+            let jar = Arc::new(CookieJar::new());
+            jar.set_cookie("existing=1; Path=/", &url);
+            let client = StealthHttpClient::with_proxy(Arc::clone(&jar), None, true, StealthPlatform::Windows);
+            client.set_extra_headers([
+                ("Cookie", "extra=1"), ("Authorization", "Bearer extra"),
+                ("User-Agent", "configured-browser"), ("X-Private", "secret"),
+            ].into_iter().map(|(k,v)| (k.into(),v.into())).collect()).await;
+            let headers = [
+                ("Origin", "https://example.test"), ("Access-Control-Request-Method", "PUT"),
+                ("Access-Control-Request-Headers", "x-probe"),
+                ("Cookie", "injected=1"), ("Authorization", "Bearer injected"),
+            ].into_iter().map(|(k,v)| (k.into(),v.into())).collect();
+            let (actual, response) = client.send_preflight(&url, &headers, Duration::from_secs(3)).await.unwrap();
+            assert_eq!(actual.as_u16(), status);
+            assert_eq!(response.get_all("access-control-allow-methods").iter()
+                .map(|h| h.to_str().unwrap()).collect::<Vec<_>>(), vec!["GET", "PUT"]);
+            assert_eq!(response.get_all("access-control-allow-headers").iter()
+                .map(|h| h.to_str().unwrap()).collect::<Vec<_>>(), vec!["X-First", "X-Probe"]);
+            assert_eq!(jar.get_cookie_header(&url), "existing=1");
+            fixture.await.unwrap();
+        }
+    }
+
 }

@@ -992,7 +992,7 @@ fn response_cache_lifetime(response: &Response) -> Option<Duration> {
 /// Derive the sec-ch-ua and sec-ch-ua-platform client-hint header values from a
 /// User-Agent string, using Chromium's per-major-version GREASE algorithm so
 /// the non-stealth HTTP path agrees with navigator.userAgentData instead of
-/// shipping a fixed Linux/Chrome-145 hint that contradicts a Windows profile.
+/// shipping a fixed Linux/Chrome-148 hint that contradicts a Windows profile.
 fn chrome_client_hints(ua: &str) -> (String, String) {
     let major: usize = ua
         .split("Chrome/")
@@ -1052,7 +1052,7 @@ impl ObscuraHttpClient {
             proxy_url: proxy_url.map(|s| s.to_string()),
             cookie_jar,
             user_agent: RwLock::new(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36".to_string(),
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36".to_string(),
             ),
             accept_language: RwLock::new("en-US,en;q=0.9".to_string()),
             extra_headers: RwLock::new(HashMap::new()),
@@ -1455,7 +1455,7 @@ impl ObscuraHttpClient {
             headers.insert(
                 HeaderName::from_static("sec-ch-ua"),
                 HeaderValue::from_str(&sec_ch_ua)
-                    .unwrap_or_else(|_| HeaderValue::from_static("\"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\", \"Chromium\";v=\"145\"")),
+                    .unwrap_or_else(|_| HeaderValue::from_static("\"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"148\", \"Chromium\";v=\"148\"")),
             );
             headers.insert(HeaderName::from_static("sec-ch-ua-mobile"), HeaderValue::from_static("?0"));
             headers.insert(
@@ -1467,7 +1467,7 @@ impl ObscuraHttpClient {
                 headers.insert(HeaderName::from_static("upgrade-insecure-requests"), HeaderValue::from_static("1"));
             }
             headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap_or_else(|_| {
-                HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
+                HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
             }));
             headers.insert(
                 reqwest::header::ACCEPT,

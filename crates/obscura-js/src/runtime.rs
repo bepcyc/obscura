@@ -953,12 +953,13 @@ impl ObscuraJsRuntime {
     ) {
         use deno_core::v8;
 
-        const IDENTITY_GLOBALS: [&str; 7] = [
+        const IDENTITY_GLOBALS: [&str; 8] = [
             "__obscura_ua",
             "__obscura_platform",
             "__obscura_ua_platform",
             "__obscura_ua_platform_version",
             "__obscura_stealth",
+            "__obscura_pin",
             "__obscura_geo_lat",
             "__obscura_geo_lon",
         ];
@@ -994,7 +995,17 @@ impl ObscuraJsRuntime {
                 continue;
             };
             let value = v8::Local::new(scope, value);
-            global.set(scope, key.into(), value);
+            if name == "__obscura_pin" {
+                // The destination bootstrap copies only numeric/null fields
+                // into fresh objects, including cross-realm screen arrays.
+                if let Some(helper) = v8::String::new(scope, "__obscura_copy_fingerprint_pin") {
+                    if let Some(function) = global.get(scope, helper.into()).and_then(|value| v8::Local::<v8::Function>::try_from(value).ok()) {
+                        function.call(scope, global.into(), &[value]);
+                    }
+                }
+            } else {
+                global.set(scope, key.into(), value);
+            }
         }
     }
 
@@ -1523,6 +1534,18 @@ impl ObscuraJsRuntime {
                 js_string_literal(ua_platform_version),
             ),
         );
+    }
+
+    /// Override generated screen size, hardware concurrency and memory before page initialization.
+    /// Explicit runtime pins also work without stealth. Each call replaces all three fields;
+    /// `None` restores that field's generated value. Environment parsing bounds are not applied here.
+    pub fn set_fingerprint_pin(&mut self, screen: Option<(u32, u32)>, cores: Option<u32>, memory_gb: Option<f64>) {
+        let pin = serde_json::json!({
+            "screen": screen.map(|(w, h)| vec![w, h]),
+            "hw": cores,
+            "mem": memory_gb,
+        });
+        let _ = self.execute_runtime_script("<set-fingerprint-pin>", format!("globalThis.__obscura_copy_fingerprint_pin({pin});"));
     }
 
     pub fn set_stealth(&mut self, enabled: bool) {
@@ -4729,6 +4752,91 @@ mod tests {
         rt
     }
 
+    /// `set_fingerprint_pin` must reach the page: the screen, `hardwareConcurrency` and `deviceMemory` the page sees are
+    /// the pinned ones, not a random draw (a unit test of the parser alone does not prove this).
+    #[test]
+    fn a_pinned_fingerprint_is_what_the_page_reports() {
+        let mut rt = ObscuraJsRuntime::new();
+        rt.set_dom(parse_html("<html><body></body></html>"));
+        rt.set_url("http://example.com/test");
+        rt.set_stealth(true);
+        rt.set_fingerprint_pin(Some((1920, 1080)), Some(8), Some(8.0));
+        rt.run_page_init();
+        assert_eq!(rt.evaluate("screen.width + 'x' + screen.height").unwrap(), serde_json::json!("1920x1080"));
+        assert_eq!(rt.evaluate("navigator.hardwareConcurrency").unwrap(), serde_json::json!(8.0));
+        assert_eq!(rt.evaluate("navigator.deviceMemory").unwrap(), serde_json::json!(8.0));
+    }
+
+    #[test]
+    fn partial_pins_preserve_seeded_generated_fields() {
+        let mut rt = ObscuraJsRuntime::new();
+        rt.set_dom(parse_html("<html><body></body></html>"));
+        rt.set_url("http://example.com/test");
+        rt.set_stealth(true);
+        rt.execute_script("fixed-fingerprint-seed", "Date.now = () => 0; Math.random = () => 2 / 0xFFFFFFFF;").unwrap();
+        rt.set_fingerprint_pin(Some((1234, 777)), None, None);
+        rt.run_page_init();
+        let values = rt.evaluate("[screen.width,screen.height,navigator.hardwareConcurrency,navigator.deviceMemory]").unwrap();
+        assert_eq!(values.as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>(), vec![1234.0,777.0,16.0,4.0]);
+    }
+
+    #[test]
+    fn null_pins_preserve_seeded_defaults_and_clear_preinitialization_pins() {
+        let mut rt = ObscuraJsRuntime::new();
+        rt.set_dom(parse_html("<html><body></body></html>"));
+        rt.set_url("http://example.com/test");
+        rt.set_stealth(true);
+        rt.execute_script("fixed-fingerprint-seed", "Date.now = () => 0; Math.random = () => 2 / 0xFFFFFFFF;").unwrap();
+        rt.set_fingerprint_pin(Some((1234, 777)), Some(7), Some(63.5));
+        rt.set_fingerprint_pin(None, None, None);
+        rt.run_page_init();
+        let values = rt.evaluate("[screen.width,screen.height,navigator.hardwareConcurrency,navigator.deviceMemory]").unwrap();
+        assert_eq!(values.as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>(), vec![2560.0,1440.0,16.0,4.0]);
+    }
+
+    #[test]
+    fn fingerprint_pins_reach_frames_without_sharing_mutable_objects() {
+        let mut rt = ObscuraJsRuntime::new();
+        rt.set_dom(parse_html("<html><body></body></html>"));
+        rt.set_url("http://example.com/test");
+        rt.set_stealth(true);
+        rt.set_fingerprint_pin(Some((1234, 777)), Some(7), Some(4.0));
+        rt.run_page_init();
+        let result = rt.evaluate_script(r#"(() => {
+            const a = document.createElement('iframe'); document.body.appendChild(a);
+            const child = a.contentWindow;
+            const initial = [child.screen.width,child.screen.height,child.navigator.hardwareConcurrency,child.navigator.deviceMemory];
+            const separate = [child.__obscura_pin !== globalThis.__obscura_pin, child.__obscura_pin.screen !== globalThis.__obscura_pin.screen, child.__obscura_pin.screen instanceof child.Array];
+            child.__obscura_pin.screen[0] = 999; child.__obscura_pin.hw = 99;
+            const b = document.createElement('iframe'); document.body.appendChild(b);
+            return {initial,separate,parent:[globalThis.__obscura_pin.screen[0],globalThis.__obscura_pin.hw],later:[b.contentWindow.screen.width,b.contentWindow.navigator.hardwareConcurrency]};
+        })()"#).unwrap();
+        let numbers = |key: &str| result[key].as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>();
+        assert_eq!(numbers("initial"), vec![1234.0,777.0,7.0,4.0]);
+        assert_eq!(result["separate"], serde_json::json!([true,true,true]));
+        assert_eq!(numbers("parent"), vec![1234.0,7.0]);
+        assert_eq!(numbers("later"), vec![1234.0,7.0]);
+        assert_eq!(rt.evaluate("[Object.keys(window).includes('__obscura_pin'), Reflect.ownKeys(window).includes('__obscura_copy_fingerprint_pin')]").unwrap(), serde_json::json!([false,false]));
+    }
+
+    #[test]
+    fn explicit_viewport_and_screen_metrics_take_precedence_over_runtime_pin() {
+        let mut rt = ObscuraJsRuntime::new();
+        rt.set_dom(parse_html("<html><body></body></html>"));
+        rt.set_url("http://example.com/test");
+        // The explicit embedding API works without stealth; environment pins
+        // are separately applied only by the stealth browser path.
+        rt.set_fingerprint_pin(Some((1920, 1080)), Some(7), Some(4.0));
+        rt.set_viewport(300.0, 200.0);
+        rt.set_screen_size_override(Some((1440.0, 900.0)), true);
+        rt.run_page_init();
+        let values = rt.evaluate("[screen.width,screen.height,innerWidth,innerHeight,devicePixelRatio,navigator.hardwareConcurrency]").unwrap();
+        assert_eq!(values.as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>(), vec![1440.0,900.0,300.0,200.0,1.0,7.0]);
+        rt.set_screen_size_override(None, false);
+        let values = rt.evaluate("[screen.width,screen.height,innerWidth,innerHeight,devicePixelRatio]").unwrap();
+        assert_eq!(values.as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>(), vec![1920.0,1080.0,300.0,200.0,1.0]);
+    }
+
     #[cfg(feature = "render")]
     #[test]
     fn static_accessibility_visibility_does_not_allocate_geometry() {
@@ -4989,6 +5097,7 @@ mod tests {
             std::sync::Arc::new(obscura_net::CookieJar::new()),
             None,
             true,
+            obscura_net::StealthPlatform::Windows,
             ),
         ));
         assert!(rt.has_page_transport());
@@ -21555,7 +21664,7 @@ mod tests {
         rt.set_http_client(client.clone());
         #[cfg(feature = "stealth")]
         rt.set_stealth_client(std::sync::Arc::new(obscura_net::StealthHttpClient::with_proxy(
-            client.cookie_jar.clone(), None, true,
+            client.cookie_jar.clone(), None, true, obscura_net::StealthPlatform::Windows,
         )));
         rt.execute_script("start-abort-fetch", &format!(r#"
             globalThis.abortController = new AbortController();
@@ -21621,7 +21730,7 @@ mod tests {
         ));
         #[cfg(feature = "stealth")]
         rt.set_stealth_client(std::sync::Arc::new(
-            obscura_net::StealthHttpClient::with_proxy(cookie_jar, None, true),
+            obscura_net::StealthHttpClient::with_proxy(cookie_jar, None, true, obscura_net::StealthPlatform::Windows),
         ));
         rt.execute_script("header-first-fetch", &format!(
             "globalThis.headerResponse = null; fetch({target:?}).then(r => headerResponse = r);"
@@ -21728,6 +21837,19 @@ mod tests {
     }
 
     fn cors_preflight_runtime() -> (ObscuraJsRuntime, String, std::sync::mpsc::Receiver<String>) {
+        cors_preflight_runtime_with_response(
+            "HTTP/1.1 204 No Content\r\n\
+             Access-Control-Allow-Origin: *\r\n\
+             Access-Control-Allow-Headers: content-type\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+    }
+
+    fn cors_preflight_runtime_with_response(preflight_response: &'static str) -> (
+        ObscuraJsRuntime,
+        String,
+        std::sync::mpsc::Receiver<String>,
+    ) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let target = format!("http://{address}/resource");
@@ -21744,11 +21866,7 @@ mod tests {
                 let request = String::from_utf8_lossy(&request[..length]).to_string();
                 requests_tx.send(request.clone()).unwrap();
                 let response = if request.starts_with("OPTIONS ") {
-                    "HTTP/1.1 204 No Content\r\n\
-                     Access-Control-Allow-Origin: *\r\n\
-                     Access-Control-Allow-Headers: content-type\r\n\
-                     Content-Length: 0\r\nConnection: close\r\n\r\n"
-                        .to_string()
+                    preflight_response.to_string()
                 } else {
                     "HTTP/1.1 200 OK\r\n\
                      Access-Control-Allow-Origin: *\r\n\
@@ -21768,6 +21886,47 @@ mod tests {
             ),
         ));
         (rt, target, requests_rx)
+    }
+
+    async fn assert_preflight_status_precedes_cors_headers(stealth: bool) {
+        // A failed OPTIONS without CORS headers must report its HTTP status,
+        // rather than a missing permission header, in either transport mode.
+        let (mut rt, target, requests) = cors_preflight_runtime_with_response(
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        if stealth {
+            #[cfg(feature = "stealth")]
+            rt.set_stealth_client(std::sync::Arc::new(
+                obscura_net::StealthHttpClient::with_proxy(
+                    std::sync::Arc::new(obscura_net::CookieJar::new()), None, true, obscura_net::StealthPlatform::Windows,
+                ),
+            ));
+            #[cfg(not(feature = "stealth"))]
+            panic!("the stealth preflight test requires the stealth feature");
+        }
+        let result = rt.call_function_on_for_cdp(
+            &format!(r#"async () => fetch({target:?}, {{ method: "DELETE" }})
+                .then(() => "resolved", error => error.message)"#),
+            None, &[], true, true,
+        ).await.unwrap();
+        let value = result.value.unwrap();
+        let message = value.as_str().expect("preflight rejection message");
+        assert!(message.contains("CORS preflight returned HTTP 403"), "{message}");
+        let request = requests.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        assert!(request.starts_with("OPTIONS /resource "), "{request}");
+        assert!(requests.recv_timeout(std::time::Duration::from_millis(100)).is_err(),
+            "the denied DELETE request reached the server");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preflight_status_precedes_cors_headers() {
+        assert_preflight_status_precedes_cors_headers(false).await;
+    }
+
+    #[cfg(feature = "stealth")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn stealth_preflight_status_precedes_cors_headers() {
+        assert_preflight_status_precedes_cors_headers(true).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -22199,7 +22358,23 @@ mod tests {
     // if the final destination would authorize the request.
     #[tokio::test(flavor = "current_thread")]
     async fn cors_mode_blocks_unauthorized_cross_origin_redirect_hop() {
-        let (mut rt, redirector) = cross_origin_intermediate_redirect_runtime();
+        let (rt, redirector) = cross_origin_intermediate_redirect_runtime();
+        assert_cors_blocks_unauthorized_redirect(rt, redirector).await;
+    }
+
+    #[cfg(feature = "stealth")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn stealth_cors_mode_blocks_unauthorized_cross_origin_redirect_hop() {
+        let (rt, redirector) = cross_origin_intermediate_redirect_runtime();
+        rt.set_stealth_client(std::sync::Arc::new(
+            obscura_net::StealthHttpClient::with_proxy(
+                std::sync::Arc::new(obscura_net::CookieJar::new()), None, true, obscura_net::StealthPlatform::Windows,
+            ),
+        ));
+        assert_cors_blocks_unauthorized_redirect(rt, redirector).await;
+    }
+
+    async fn assert_cors_blocks_unauthorized_redirect(mut rt: ObscuraJsRuntime, redirector: String) {
         let result = rt
             .call_function_on_for_cdp(
                 &format!(

@@ -21,7 +21,7 @@ const __obscuraCore = globalThis.Deno.core;
     '__obscura_errors', '__obscura_init', '__obscura_hide_list',
     '__obscura_objects', '__obscura_oid', '__obscura_ua',
     '__obscura_platform', '__obscura_ua_platform', '__obscura_ua_platform_version',
-    '__obscura_stealth', '__obscura_markTrusted', '__obscura_fireBeforeUnload', '__obscura_core_handoff',
+    '__obscura_stealth', '__obscura_pin', '__obscura_copy_fingerprint_pin', '__obscura_markTrusted', '__obscura_fireBeforeUnload', '__obscura_core_handoff',
     // Created by later evaluation, input and emulation paths. Register them
     // before the snapshot hide list is captured, just like the other internals.
     '__obscura_await_rejected', '__obscura_click_target',
@@ -700,6 +700,25 @@ async function _loadLinkedStylesheet(c) {
   } catch(e) {
     try { c.dispatchEvent(new Event('error', { bubbles: true })); } catch(e) {}
   }
+}
+
+// Snapshot bounded pin fields in this realm; never retain another realm's
+// object/array or copy arbitrary page-controlled properties.
+globalThis.__obscura_copy_fingerprint_pin = function(source) {
+  const positive = value => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+  const pin = source && typeof source === 'object' ? source : {};
+  const rawScreen = pin.screen;
+  const screen = Array.isArray(rawScreen) ? rawScreen : null;
+  const width = positive(screen?.[0]), height = positive(screen?.[1]);
+  globalThis.__obscura_pin = {
+    screen: width !== null && height !== null ? [width, height] : null,
+    hw: positive(pin.hw), mem: positive(pin.mem),
+  };
+};
+
+function _fpScreen() {
+  const screen = globalThis.__obscura_pin?.screen;
+  return Array.isArray(screen) && screen[0] > 0 && screen[1] > 0 ? screen : _fp('screen');
 }
 
 function _fpRand(salt) {
@@ -8110,12 +8129,12 @@ globalThis.navigator = {
   defGetter('userAgent', function() {
     return globalThis.__obscura_ua ||
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+      "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
   });
   defGetter('appVersion', function() {
     return (globalThis.__obscura_ua ||
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36").replace('Mozilla/', '');
+      "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36").replace('Mozilla/', '');
   });
   defGetter('platform', function() {
     return globalThis.__obscura_platform || "Win32";
@@ -8232,7 +8251,7 @@ globalThis.__obscura_set_screen_override = function(w, h, emulated) {
   // Deleting them makes page initialization recreate read-only properties.
   globalThis.__obscura_screen_w = undefined;
   globalThis.__obscura_screen_h = undefined;
-  const fallback = _fp('screen');
+  const fallback = _fpScreen();
   _applyScreenSize(fallback[0], fallback[1], !!emulated);
 };
 globalThis.visualViewport = { width:1920, height:1000, offsetLeft:0, offsetTop:0, scale:1, addEventListener(){}, removeEventListener(){} };
@@ -15389,6 +15408,7 @@ function _ensureInitialFrameRealm(element, srcdoc) {
                        '__obscura_geo_lat', '__obscura_geo_lon']) {
       if (globalThis[name] !== undefined) child[name] = globalThis[name];
     }
+    child.__obscura_copy_fingerprint_pin(globalThis.__obscura_pin);
     child.__obscura_frameId = id;
     child.__obscura_parentFrameId = _realmFrameId;
     child.__obscura_init();
@@ -18333,7 +18353,8 @@ globalThis.__obscura_init = function() {
   _registerWindowNamedTree(globalThis.document.documentElement);
   _reconcileWindowNamedProperties(previousWindowNames);
 
-  const scr = _fp('screen');
+  const _pin = globalThis.__obscura_pin || {};
+  const scr = _fpScreen();
   const sw = Number.isFinite(globalThis.__obscura_screen_w) && globalThis.__obscura_screen_w > 0
     ? globalThis.__obscura_screen_w : scr[0];
   const sh = Number.isFinite(globalThis.__obscura_screen_h) && globalThis.__obscura_screen_h > 0
@@ -18356,9 +18377,9 @@ globalThis.__obscura_init = function() {
   globalThis.outerWidth = sw; globalThis.outerHeight = sh - 40;
 
   var hwValues = globalThis.__obscura_stealth ? [4, 6, 8, 12, 16] : [2, 4, 6, 8, 12, 16];
-  globalThis.__obscura_hw = hwValues[Math.floor(_fpRand(400) * hwValues.length)];
+  globalThis.__obscura_hw = (_pin.hw > 0) ? _pin.hw : hwValues[Math.floor(_fpRand(400) * hwValues.length)];
   var memValues = globalThis.__obscura_stealth ? [4, 8] : [0.25, 0.5, 1, 2, 4, 8];
-  globalThis.__obscura_mem = memValues[Math.floor(_fpRand(401) * memValues.length)];
+  globalThis.__obscura_mem = (_pin.mem > 0) ? _pin.mem : memValues[Math.floor(_fpRand(401) * memValues.length)];
 
   const timing = {};
   for (const name of Object.keys(JSON.parse(_dom('performance_timing')))) {

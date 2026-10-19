@@ -13,6 +13,7 @@ use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use obscura_browser::{BrowserContext, Page};
 use obscura_dom::NodeId;
+use obscura_net::StealthPlatform;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -82,19 +83,20 @@ pub struct BrowserState {
 }
 
 impl BrowserState {
-    pub fn new(proxy: Option<String>, user_agent: Option<String>, stealth: bool) -> Self {
+    pub fn new(proxy: Option<String>, user_agent: Option<String>, stealth: bool, platform: StealthPlatform) -> Self {
         // `--storage-dir` is a global flag, so the profile arrives through the
         // environment rather than through every constructor call. Without this
         // the MCP path silently ignored the flag and persisted nothing, cookies
         // included.
         let storage_dir = std::env::var_os("OBSCURA_STORAGE_DIR").map(std::path::PathBuf::from);
-        let context = BrowserContext::with_storage_full(
+        let mut context = BrowserContext::with_storage_full(
             "mcp".to_string(),
             proxy,
             stealth,
             None,
             storage_dir,
         );
+        context.stealth_platform = platform;
         BrowserState {
             tabs: std::collections::BTreeMap::new(),
             active_tab: None,
@@ -251,13 +253,18 @@ pub(crate) async fn dispatch(method: &str, id: Value, params: &Value, state: &mu
     }
 }
 
-pub async fn run(proxy: Option<String>, user_agent: Option<String>, stealth: bool) -> Result<()> {
+pub async fn run(
+    proxy: Option<String>,
+    user_agent: Option<String>,
+    stealth: bool,
+    platform: StealthPlatform,
+) -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);
     let mut writer = stdout;
 
-    let mut state = BrowserState::new(proxy, user_agent, stealth);
+    let mut state = BrowserState::new(proxy, user_agent, stealth, platform);
     state.operator_network_hints = true;
     // Cookies and Web Storage are written on every navigation; this covers the
     // writes an agent makes after a page has settled, on the way out.
@@ -2285,7 +2292,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn tab_switch_preserves_globals_listeners_and_pending_promises() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         let mut tabs = Vec::new();
         for index in 0..3 {
             tool_tab_new(&json!({"url":"data:text/html,<button id=action>Increment</button>"}), &mut state).await.unwrap();
@@ -2307,7 +2314,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn live_tabs_with_frames_can_close_in_any_order_and_reopen() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         let mut tabs = Vec::new();
         for index in 0..3 {
             tool_tab_new(&json!({"url":"data:text/html,<iframe srcdoc='<p>Child frame</p>'></iframe>"}), &mut state).await.unwrap();
@@ -2327,7 +2334,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn snapshot_references_are_actionable_without_an_extra_listing() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate("data:text/html,<label for=q>Work email</label><input id=q><button aria-label='Save account' onclick='window.saved=true'>Unhelpful text</button>").await.unwrap();
         let snapshot = tool_snapshot(&json!({}), &mut state).unwrap();
         let action = snapshot.lines().find(|line| line.starts_with("ref=") && line.contains("Save account"))
@@ -2341,7 +2348,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn snapshot_exposes_live_states_without_password_values() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate("data:text/html,<input id=c type=checkbox checked aria-label=Consent><input id=f value=old aria-label=Account><input id=p type=password aria-label=Password><button disabled>Blocked</button><div role=tab aria-selected=true>Overview</div><button aria-expanded=false>Details</button>").await.unwrap();
         state.page_mut().evaluate("(function(){document.getElementById('c').checked=false;document.getElementById('f').value='fresh';document.getElementById('p').value='private-password';return true;})()");
         let snapshot = tool_snapshot(&json!({}), &mut state).unwrap();
@@ -2353,7 +2360,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn snapshot_budget_bounds_metadata_and_never_splits_a_reference() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         let html = format!("<title>{}</title><button>Continue</button><p>{}</p>", "界".repeat(1000), "Body ".repeat(2000));
         state.page_mut().navigate(&format!("data:text/html,{html}")).await.unwrap();
         let snapshot = tool_snapshot(&json!({"max_chars":96}), &mut state).unwrap();
@@ -2371,7 +2378,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn snapshot_omits_hidden_content_and_controls() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate("data:text/html,<p>Visible</p><div hidden><button>Hidden action</button><p>Hidden body</p></div><div aria-hidden=true>Private panel</div>").await.unwrap();
         let snapshot = tool_snapshot(&json!({}), &mut state).unwrap();
         let content = snapshot.split_once("\n\n").unwrap().1;
@@ -2383,7 +2390,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn snapshots_preserve_generic_interactive_text_and_hidden_referenced_names() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate("data:text/html,<div tabindex=0 onclick='window.opened=true'>Open <b>folder</b></div><span id=label hidden>Accessible details</span><button aria-labelledby=label>Other text</button>").await.unwrap();
         let snapshot = tool_snapshot(&json!({}), &mut state).unwrap();
         assert!(snapshot.lines().any(|line| line.starts_with("ref=") && line.contains("Open folder")), "unlabelled generic controls must keep their visible text: {snapshot}");
@@ -2393,7 +2400,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn snapshots_apply_css_visibility_without_hiding_visible_overrides() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate("data:text/html,<style>.gone{display:none}.invisible{visibility:hidden}.shown{visibility:visible}</style><div class=gone><button>CSS hidden action</button></div><div class=invisible>Hidden text<button class=shown>Visible override</button></div>").await.unwrap();
         let snapshot = tool_snapshot(&json!({}), &mut state).unwrap();
         let content = snapshot.split_once("\n\n").unwrap().1;
@@ -2411,7 +2418,7 @@ mod tests {
                 std::process::exit(1);
             }
         });
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate("data:text/html,<p>Content</p>").await.unwrap();
         assert_eq!(state.page_mut().evaluate("(function(){globalThis.savedStringify=JSON.stringify;JSON.stringify=function(){while(true){}};return true;})()"), json!(true));
         let result = tool_extract(&json!({"schema":{"text":"p"}}), &mut state);
@@ -2424,7 +2431,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn evaluate_failures_are_mcp_tool_errors() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate("data:text/html,<p>Evaluate</p>").await.unwrap();
         let mut responses = Vec::new();
         for expression in [
@@ -2446,7 +2453,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn evaluate_runs_scripts_once_and_preserves_null_results() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate("data:text/html,<p>Evaluate</p>").await.unwrap();
         for expression in ["null", "undefined", "Promise.resolve(null)"] {
             assert_eq!(tool_evaluate(&json!({"expression": expression}), &mut state).await.unwrap(), "null");
@@ -2467,7 +2474,7 @@ mod tests {
             ("browser_press_key", json!({"selector":"#action", "key":"Enter"}), "document.getElementById('action').dispatchEvent = function(){throw new Error('action failed')};"),
             ("browser_scroll", json!({"selector":"#action"}), "document.getElementById('action').scrollIntoView = function(){throw new Error('action failed')};"),
         ] {
-            let mut state = BrowserState::new(None, None, false);
+            let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
             state.page_mut().navigate("data:text/html,<button id=action>Continue</button>").await.unwrap();
             assert_eq!(state.page_mut().evaluate(&format!("(function(){{{setup} return true;}})()")), json!(true));
             let response = dispatch("tools/call", json!(1), &json!({"name":tool,"arguments":arguments}), &mut state).await;
@@ -2480,7 +2487,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn form_errors_prevent_submission() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate("data:text/html,<input id=q><button id=go onclick='window.submits++'>Submit</button><script>window.submits=0</script>").await.unwrap();
         let response = dispatch("tools/call", json!(1), &json!({"name":"browser_fill_form", "arguments":{
             "fields":[{"selector":"#q","value":"kept"},{"selector":"#missing","value":"bad"}],
@@ -2498,7 +2505,7 @@ mod tests {
     async fn fill_form_submission_reaches_the_server_before_replying() {
         std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
         let (base, requests) = spawn_form_recording_server();
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate(&base).await.unwrap();
         assert!(requests.recv_timeout(std::time::Duration::from_secs(2)).unwrap().starts_with("GET /"));
         let response = dispatch("tools/call", json!(1), &json!({"name":"browser_fill_form", "arguments":{
@@ -2515,7 +2522,7 @@ mod tests {
         std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
         let (first, _) = spawn_form_recording_server();
         let (second, _) = spawn_form_recording_server();
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         tool_set_storage_state(&json!({"state": {"origins": [
             {"origin": first, "localStorage": [["token", "first"]], "sessionStorage": [["tab", "first-session"]]},
             {"origin": second, "localStorage": [["token", "second"]], "sessionStorage": [["tab", "second-session"]]}
@@ -2541,7 +2548,7 @@ mod tests {
         std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
         let (first, _) = spawn_form_recording_server();
         let (second, _) = spawn_form_recording_server();
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         for (origin, value) in [(&first, "first"), (&second, "second")] {
             state.page_mut().navigate(origin).await.expect("fixture page");
             state.page_mut().evaluate(&format!("(function(){{localStorage.setItem('token', '{value}'); sessionStorage.setItem('tab', '{value}-session'); return true;}})()"));
@@ -2563,7 +2570,7 @@ mod tests {
             json!({"origin": "https://other.test/path", "localStorage": [["token", "bad"]]}),
             json!({"origin": "https://other.test", "localStorage": [["token", 12]]}),
         ] {
-            let mut state = BrowserState::new(None, None, false);
+            let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
             let result = tool_set_storage_state(&json!({"state": {"origins": [
                 {"origin": "https://first.test", "localStorage": [["token", "partial"]]}, invalid
             ]}}), &mut state);
@@ -2575,7 +2582,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn storage_restore_reports_rejected_quota_writes() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         let result = tool_set_storage_state(&json!({"state": {"origins": [
             {"origin": "https://first.test", "localStorage": [["oversized", "x".repeat(5 * 1024 * 1024 + 1)]]}
         ]}}), &mut state);
@@ -2587,14 +2594,14 @@ mod tests {
     async fn storage_state_round_trip_preserves_nul_prefixed_strings() {
         std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
         let (origin, _) = spawn_form_recording_server();
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate(&origin).await.expect("fixture page");
         state.page_mut().evaluate(r#"(function(){localStorage.setItem('\0key', '\0"value"'); sessionStorage.setItem('\0tab', '\0session'); return true;})()"#);
         let exported: Value = serde_json::from_str(&tool_storage_state(&mut state).expect("export")).unwrap();
         assert_eq!(exported["origins"][0]["localStorage"], json!([["\0key", "\0\"value\""]]));
         assert_eq!(exported["origins"][0]["sessionStorage"], json!([["\0tab", "\0session"]]));
         drop(state);
-        let mut restored = BrowserState::new(None, None, false);
+        let mut restored = BrowserState::new(None, None, false, StealthPlatform::host());
         tool_set_storage_state(&json!({"state": exported}), &mut restored).expect("restore");
         restored.page_mut().navigate(&origin).await.expect("restored page");
         assert_eq!(restored.page_mut().evaluate(r#"[localStorage.getItem('\0key'), sessionStorage.getItem('\0tab')]"#),
@@ -2607,7 +2614,7 @@ mod tests {
             "button.replaceWith(copy)",
             "button.before(copy)",
         ] {
-            let mut state = BrowserState::new(None, None, false);
+            let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
             state.page_mut().navigate("data:text/html,<button id=target>Buy</button>")
                 .await.expect("test page");
             tool_snapshot(&json!({}), &mut state).expect("snapshot");
@@ -2630,7 +2637,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn element_refs_from_old_snapshots_cannot_alias_new_targets() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate("data:text/html,<button id=target>Buy</button>")
             .await.expect("test page");
         tool_snapshot(&json!({}), &mut state).expect("snapshot");
@@ -2646,7 +2653,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn element_refs_follow_the_same_connected_node_after_reordering() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate("data:text/html,<button id=target>Buy</button><p>Details</p>")
             .await.expect("test page");
         tool_snapshot(&json!({}), &mut state).expect("snapshot");
@@ -2660,7 +2667,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn first_evaluation_and_promise_results_work_without_prior_state() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate("data:text/html,<p>Evaluate</p>").await.unwrap();
         assert_eq!(tool_evaluate(&json!({"expression":"1 + 1"}), &mut state).await.unwrap().parse::<f64>().unwrap(), 2.0);
         assert_eq!(tool_evaluate(&json!({"expression":"Promise.resolve(3)"}), &mut state).await.unwrap().parse::<f64>().unwrap(), 3.0);
@@ -2722,7 +2729,7 @@ mod tests {
     #[tokio::test]
     async fn local_network_hint_is_limited_to_operator_stdio_state() {
         std::env::remove_var("OBSCURA_ALLOW_PRIVATE_NETWORK");
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         let args = json!({"url": "http://localhost:9/"});
         let remote_error = tool_navigate(&args, &mut state).await.unwrap_err();
         assert!(remote_error.contains("is not allowed"));
@@ -2739,7 +2746,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mcp_navigation_rejects_local_files() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         let error = tool_navigate(&json!({"url": "file:///etc/passwd"}), &mut state)
             .await
             .expect_err("MCP must not expose local files");
@@ -2750,7 +2757,7 @@ mod tests {
     // browser_navigate: the browser layer enforces it for all of them.
     #[tokio::test(flavor = "current_thread")]
     async fn mcp_tab_new_rejects_local_files() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         let error = tool_tab_new(&json!({"url": "file:///etc/passwd"}), &mut state)
             .await
             .expect_err("browser_tab_new must not expose local files");
@@ -2766,7 +2773,7 @@ mod tests {
         std::fs::write(&path, "<p>local-secret</p>").expect("write fixture");
         let file_url = url::Url::from_file_path(&path).expect("file url").to_string();
 
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state
             .page_mut()
             .navigate(&format!("data:text/html,<a id=l href='{file_url}'>go</a>"))
@@ -2815,7 +2822,7 @@ mod tests {
     #[cfg(feature = "render")]
     #[tokio::test(flavor = "current_thread")]
     async fn render_tool_calls_return_mcp_binary_content_and_reject_bad_options() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state.page_mut().navigate(
             "data:text/html,<html style='margin:0'><body style='margin:0;background:red'><div style='width:64px;height:48px'></div></body></html>",
         ).await.expect("render test page should navigate");
@@ -2866,7 +2873,7 @@ mod tests {
                 console.error('mcp-console-click');\
                 setTimeout(()=>{console.error('mcp-console-async');document.body.id='done'},25)\
             }</script>";
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state
             .page_mut()
             .navigate(PAGE)
@@ -2942,7 +2949,7 @@ mod tests {
         // --allow-private-network to run their repro.
         std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
         let (base, requests) = spawn_form_recording_server();
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state
             .page_mut()
             .navigate(&base)
@@ -2979,7 +2986,7 @@ mod tests {
     async fn network_tool_includes_completed_script_fetches() {
         std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
         let (base, requests) = spawn_form_recording_server();
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state
             .page_mut()
             .navigate(&base)
@@ -3014,7 +3021,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fill_tools_notify_controlled_input_tracker() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state
             .page_mut()
             .navigate("data:text/html,<div id=root><input id=field></div>")
@@ -3090,7 +3097,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fill_form_check_and_select_use_native_setter_and_trusted_events() {
-        let mut state = BrowserState::new(None, None, false);
+        let mut state = BrowserState::new(None, None, false, StealthPlatform::host());
         state
             .page_mut()
             .navigate(

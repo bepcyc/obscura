@@ -17,6 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
 use crate::dispatch::{self, CdpContext};
+use obscura_net::StealthPlatform;
 
 // PR #36 comment 4341743194: the deferral queue in `process_with_interception`
 // must be bounded so a stalled navigation cannot OOM the process. When the cap
@@ -282,6 +283,7 @@ pub async fn start_with_full_serve_options(
         storage_dir,
         allow_private_network,
         DEFAULT_MAX_CONNECTIONS,
+        StealthPlatform::host(),
     )
     .await
 }
@@ -300,6 +302,7 @@ pub async fn start_with_serve_options_and_limit(
     storage_dir: Option<std::path::PathBuf>,
     allow_private_network: bool,
     max_connections: usize,
+    platform: StealthPlatform,
 ) -> anyhow::Result<()> {
     start_with_serve_options_limit_and_ready_file(
         port,
@@ -312,6 +315,7 @@ pub async fn start_with_serve_options_and_limit(
         allow_private_network,
         max_connections,
         None,
+        platform,
     )
     .await
 }
@@ -329,6 +333,7 @@ pub async fn start_with_serve_options_limit_and_ready_file(
     allow_private_network: bool,
     max_connections: usize,
     ready_file: Option<&Path>,
+    platform: StealthPlatform,
 ) -> anyhow::Result<()> {
     let ip: std::net::IpAddr = host
         .parse()
@@ -524,6 +529,7 @@ pub async fn start_with_serve_options_limit_and_ready_file(
         allow_private_network,
     );
     bctx.allow_file_access = allow_file_access;
+    bctx.stealth_platform = platform;
     let shared_ctx = Arc::new(bctx);
     // Persistence is deliberately separate from the connection template.
     // Cookie deltas are merged here, but new connections always clone the
@@ -1149,9 +1155,9 @@ fn handle_http_json_blocking(
 
     let body = match endpoint {
         "version" => serde_json::to_string_pretty(&json!({
-            "Browser": "Chrome/145.0.0.0",
+            "Browser": "Chrome/148.0.0.0",
             "Protocol-Version": "1.3",
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
             "V8-Version": "14.5.0.0",
             "WebKit-Version": "537.36",
             "webSocketDebuggerUrl": format!("ws://{}/devtools/browser", authority),
@@ -2290,9 +2296,9 @@ fn fast_path_response(text: &str) -> Option<String> {
         "Browser.getVersion" => {
             Some(json!({
                 "protocolVersion": "1.3",
-                "product": "Chrome/145.0.0.0",
+                "product": "Chrome/148.0.0.0",
                 "revision": "@0000000000000000000000000000000000000000",
-                "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+                "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
                 "jsVersion": "14.5.0.0",
             }))
         }

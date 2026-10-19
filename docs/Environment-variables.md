@@ -121,6 +121,34 @@ Override the coordinates the `navigator.geolocation` shim reports, as `lat,lon`.
 OBSCURA_GEOLOCATION="40.7128,-74.0060" obscura serve
 ```
 
+### `OBSCURA_FP_SCREEN`, `OBSCURA_FP_CORES`, `OBSCURA_FP_MEMORY`
+
+Optionally pin screen dimensions, `navigator.hardwareConcurrency` and
+`navigator.deviceMemory` for repeatable stealth sessions. These settings apply
+when `--stealth` is active. Unset or invalid values keep the existing generated
+value for that field; one invalid field does not discard the other valid pins.
+
+- `OBSCURA_FP_SCREEN`: `WIDTHxHEIGHT`, width 320–7680 and height 240–4320.
+  Surrounding whitespace and either `x` or `X` are accepted.
+- `OBSCURA_FP_CORES`: integer 1–128.
+- `OBSCURA_FP_MEMORY`: finite positive number up to 64, in GiB.
+
+```bash
+OBSCURA_FP_SCREEN=1920x1080 OBSCURA_FP_CORES=8 OBSCURA_FP_MEMORY=8 \
+  obscura --stealth fetch https://example.com
+```
+
+Explicit CSS viewport settings and CDP screen/device metrics take precedence;
+without an explicit viewport, the standalone runtime derives its viewport fallback
+from the selected screen. Pins do not change device scale or the chosen operating
+system. They do not change defaults when omitted. These are deliberate overrides,
+not a guarantee of Chrome-compatible fingerprint values.
+
+The embedding runtime can call `set_fingerprint_pin` before `run_page_init`,
+including without stealth. Each call replaces all three fields; `None` clears an
+earlier pin. The runtime setter takes typed values but does not enforce the
+environment parsing bounds.
+
 ### `OBSCURA_PROFILE`
 
 Pin a specific browser profile from the built-in pool by index (`0`-based). Each profile keeps `navigator.platform`, `userAgentData`, the UA string, and the GPU renderer internally consistent. Without it a single stable profile is used.

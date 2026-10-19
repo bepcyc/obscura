@@ -1097,6 +1097,7 @@ impl Page {
                 context.cookie_jar.clone(),
                 context.proxy_url.as_deref(),
                 context.allow_private_network,
+                context.stealth_platform,
             )))
         } else {
             None
@@ -1823,12 +1824,15 @@ impl Page {
 
         #[cfg(feature = "stealth")]
         if self.stealth_client.is_some() {
+            let p = self.context.stealth_platform;
             rt.set_stealth(true);
-            rt.set_user_agent(obscura_net::STEALTH_USER_AGENT);
+            let (screen, cores, memory) = fingerprint_pin_from_env(|k| std::env::var(k).ok());
+            rt.set_fingerprint_pin(screen, cores, memory);
+            rt.set_user_agent(p.user_agent());
             rt.set_platform(
-                obscura_net::STEALTH_NAVIGATOR_PLATFORM,
-                obscura_net::STEALTH_UA_PLATFORM,
-                obscura_net::STEALTH_UA_PLATFORM_VERSION,
+                p.navigator_platform(),
+                p.ua_platform(),
+                p.ua_platform_version(),
             );
         } else {
             if let Ok(ua) = self.http_client.user_agent.try_read() {
@@ -2438,6 +2442,8 @@ impl Page {
         }
 
         let client = self.http_client.clone();
+        #[cfg(feature = "stealth")]
+        let stealth_client = self.stealth_client.clone();
         let page_callbacks = self.callbacks.clone();
         let script_initiator = self
             .url
@@ -2447,6 +2453,8 @@ impl Page {
             .iter()
             .map(|(idx, url)| {
                 let client = client.clone();
+                #[cfg(feature = "stealth")]
+                let stealth_client = stealth_client.clone();
                 let cbs = page_callbacks.clone();
                 let initiator = script_initiator.clone();
                 let url = url.clone();
@@ -2479,10 +2487,15 @@ impl Page {
                         return Some((idx, url, resp));
                     }
                     let request = ResourceRequest::subresource(ResourceType::Script, &initiator);
-                    match client
-                        .fetch_resource_with_callbacks(&parsed, request, Some(&cbs))
-                        .await
-                    {
+                    #[cfg(feature = "stealth")]
+                    let response = if let Some(stealth) = stealth_client {
+                        stealth.fetch_resource_with_callbacks(&parsed, request, Some(&cbs)).await
+                    } else {
+                        client.fetch_resource_with_callbacks(&parsed, request, Some(&cbs)).await
+                    };
+                    #[cfg(not(feature = "stealth"))]
+                    let response = client.fetch_resource_with_callbacks(&parsed, request, Some(&cbs)).await;
+                    match response {
                         Ok(resp) => Some((idx, url, resp)),
                         Err(e) => {
                             tracing::warn!("Failed to fetch script {}: {}", url, e);
@@ -3489,9 +3502,15 @@ impl Page {
                 redirected_from: Vec::new(),
             })
         } else if method == "POST" {
-            self.http_client
-                .post_form_with_callbacks(&url, body, Some(&self.callbacks))
-                .await
+            #[cfg(feature = "stealth")]
+            let response = if let Some(stealth) = &self.stealth_client {
+                stealth.post_form_with_callbacks(&url, body, Some(&self.callbacks)).await
+            } else {
+                self.http_client.post_form_with_callbacks(&url, body, Some(&self.callbacks)).await
+            };
+            #[cfg(not(feature = "stealth"))]
+            let response = self.http_client.post_form_with_callbacks(&url, body, Some(&self.callbacks)).await;
+            response
         } else {
             self.do_fetch(&url).await
         }
@@ -10993,4 +11012,58 @@ fn response_body_byte_limit() -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2 * 1024 * 1024)
+}
+
+/// `OBSCURA_FP_SCREEN=1280x800`, `OBSCURA_FP_CORES=8`, `OBSCURA_FP_MEMORY=8`: pin the stealth fingerprint values
+/// that are otherwise random per page, so a second client of the same site can present the same desktop.
+/// Anything missing or malformed keeps the random draw.
+pub fn fingerprint_pin_from_env(get: impl Fn(&str) -> Option<String>) -> (Option<(u32, u32)>, Option<u32>, Option<f64>) {
+    let screen = get("OBSCURA_FP_SCREEN").and_then(|v| {
+        let (w, h) = v.trim().to_ascii_lowercase().split_once('x').map(|(a, b)| (a.to_string(), b.to_string()))?;
+        match (w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?) {
+            (w, h) if (320..=7680).contains(&w) && (240..=4320).contains(&h) => Some((w, h)),
+            _ => None,
+        }
+    });
+    let cores = get("OBSCURA_FP_CORES").and_then(|v| v.trim().parse::<u32>().ok()).filter(|c| (1..=128).contains(c));
+    let memory = get("OBSCURA_FP_MEMORY").and_then(|v| v.trim().parse::<f64>().ok()).filter(|m| *m > 0.0 && *m <= 64.0);
+    (screen, cores, memory)
+}
+
+#[cfg(test)]
+mod fingerprint_pin_tests {
+    use super::fingerprint_pin_from_env;
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+    }
+
+    #[test]
+    fn pins_are_independent_and_accept_trimmed_boundary_values() {
+        assert_eq!(fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", " 320 X 240 ")])), (Some((320, 240)), None, None));
+        assert_eq!(fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", "7680x4320"), ("OBSCURA_FP_CORES", " 128 "), ("OBSCURA_FP_MEMORY", " 64 ")])), (Some((7680, 4320)), Some(128), Some(64.0)));
+        assert_eq!(fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", "bad"), ("OBSCURA_FP_CORES", "1"), ("OBSCURA_FP_MEMORY", "0.25")])), (None, Some(1), Some(0.25)));
+    }
+
+    #[test]
+    fn malformed_overflow_and_non_finite_pins_do_not_override_defaults() {
+        for screen in ["", "0x0", "319x240", "320x239", "7681x4320", "7680x4321", "1280x800x1", "-1x800", "4294967296x800"] {
+            assert_eq!(fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", screen)])), (None, None, None), "screen {screen:?}");
+        }
+        for cores in ["", "0", "129", "-1", "8.5", "4294967296"] {
+            assert_eq!(fingerprint_pin_from_env(env(&[("OBSCURA_FP_CORES", cores)])), (None, None, None), "cores {cores:?}");
+        }
+        for memory in ["", "0", "-1", "65", "NaN", "inf", "-inf", "1e999"] {
+            assert_eq!(fingerprint_pin_from_env(env(&[("OBSCURA_FP_MEMORY", memory)])), (None, None, None), "memory {memory:?}");
+        }
+    }
+
+    #[test]
+    fn valid_environment_pins_parse_and_invalid_fields_are_absent() {
+        let ok = fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", "1280x800"), ("OBSCURA_FP_CORES", "8"), ("OBSCURA_FP_MEMORY", "8")]));
+        assert_eq!(ok, (Some((1280, 800)), Some(8), Some(8.0)));
+        let bad = fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", "wide"), ("OBSCURA_FP_CORES", "0"), ("OBSCURA_FP_MEMORY", "-1")]));
+        assert_eq!(bad, (None, None, None));
+        assert_eq!(fingerprint_pin_from_env(env(&[])), (None, None, None));
+    }
 }
