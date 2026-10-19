@@ -11039,7 +11039,27 @@ mod fingerprint_pin_tests {
     }
 
     #[test]
-    fn a_valid_pin_is_read_and_a_bad_one_keeps_the_random_draw() {
+    fn pins_are_independent_and_accept_trimmed_boundary_values() {
+        assert_eq!(fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", " 320 X 240 ")])), (Some((320, 240)), None, None));
+        assert_eq!(fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", "7680x4320"), ("OBSCURA_FP_CORES", " 128 "), ("OBSCURA_FP_MEMORY", " 64 ")])), (Some((7680, 4320)), Some(128), Some(64.0)));
+        assert_eq!(fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", "bad"), ("OBSCURA_FP_CORES", "1"), ("OBSCURA_FP_MEMORY", "0.25")])), (None, Some(1), Some(0.25)));
+    }
+
+    #[test]
+    fn malformed_overflow_and_non_finite_pins_do_not_override_defaults() {
+        for screen in ["", "0x0", "319x240", "320x239", "7681x4320", "7680x4321", "1280x800x1", "-1x800", "4294967296x800"] {
+            assert_eq!(fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", screen)])), (None, None, None), "screen {screen:?}");
+        }
+        for cores in ["", "0", "129", "-1", "8.5", "4294967296"] {
+            assert_eq!(fingerprint_pin_from_env(env(&[("OBSCURA_FP_CORES", cores)])), (None, None, None), "cores {cores:?}");
+        }
+        for memory in ["", "0", "-1", "65", "NaN", "inf", "-inf", "1e999"] {
+            assert_eq!(fingerprint_pin_from_env(env(&[("OBSCURA_FP_MEMORY", memory)])), (None, None, None), "memory {memory:?}");
+        }
+    }
+
+    #[test]
+    fn valid_environment_pins_parse_and_invalid_fields_are_absent() {
         let ok = fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", "1280x800"), ("OBSCURA_FP_CORES", "8"), ("OBSCURA_FP_MEMORY", "8")]));
         assert_eq!(ok, (Some((1280, 800)), Some(8), Some(8.0)));
         let bad = fingerprint_pin_from_env(env(&[("OBSCURA_FP_SCREEN", "wide"), ("OBSCURA_FP_CORES", "0"), ("OBSCURA_FP_MEMORY", "-1")]));

@@ -995,7 +995,17 @@ impl ObscuraJsRuntime {
                 continue;
             };
             let value = v8::Local::new(scope, value);
-            global.set(scope, key.into(), value);
+            if name == "__obscura_pin" {
+                // The destination bootstrap copies only numeric/null fields
+                // into fresh objects, including cross-realm screen arrays.
+                if let Some(helper) = v8::String::new(scope, "__obscura_copy_fingerprint_pin") {
+                    if let Some(function) = global.get(scope, helper.into()).and_then(|value| v8::Local::<v8::Function>::try_from(value).ok()) {
+                        function.call(scope, global.into(), &[value]);
+                    }
+                }
+            } else {
+                global.set(scope, key.into(), value);
+            }
         }
     }
 
@@ -1526,15 +1536,16 @@ impl ObscuraJsRuntime {
         );
     }
 
-    /// Pin the parts of the stealth fingerprint that are otherwise drawn at random per page: the screen size,
-    /// `navigator.hardwareConcurrency` and `navigator.deviceMemory`. `None` keeps the random draw.
+    /// Override generated screen size, hardware concurrency and memory before page initialization.
+    /// Explicit runtime pins also work without stealth. Each call replaces all three fields;
+    /// `None` restores that field's generated value. Environment parsing bounds are not applied here.
     pub fn set_fingerprint_pin(&mut self, screen: Option<(u32, u32)>, cores: Option<u32>, memory_gb: Option<f64>) {
         let pin = serde_json::json!({
             "screen": screen.map(|(w, h)| vec![w, h]),
             "hw": cores,
             "mem": memory_gb,
         });
-        let _ = self.execute_runtime_script("<set-fingerprint-pin>", format!("globalThis.__obscura_pin = {pin};"));
+        let _ = self.execute_runtime_script("<set-fingerprint-pin>", format!("globalThis.__obscura_copy_fingerprint_pin({pin});"));
     }
 
     pub fn set_stealth(&mut self, enabled: bool) {
@@ -4754,6 +4765,76 @@ mod tests {
         assert_eq!(rt.evaluate("screen.width + 'x' + screen.height").unwrap(), serde_json::json!("1920x1080"));
         assert_eq!(rt.evaluate("navigator.hardwareConcurrency").unwrap(), serde_json::json!(8.0));
         assert_eq!(rt.evaluate("navigator.deviceMemory").unwrap(), serde_json::json!(8.0));
+    }
+
+    #[test]
+    fn partial_pins_preserve_seeded_generated_fields() {
+        let mut rt = ObscuraJsRuntime::new();
+        rt.set_dom(parse_html("<html><body></body></html>"));
+        rt.set_url("http://example.com/test");
+        rt.set_stealth(true);
+        rt.execute_script("fixed-fingerprint-seed", "Date.now = () => 0; Math.random = () => 2 / 0xFFFFFFFF;").unwrap();
+        rt.set_fingerprint_pin(Some((1234, 777)), None, None);
+        rt.run_page_init();
+        let values = rt.evaluate("[screen.width,screen.height,navigator.hardwareConcurrency,navigator.deviceMemory]").unwrap();
+        assert_eq!(values.as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>(), vec![1234.0,777.0,16.0,4.0]);
+    }
+
+    #[test]
+    fn null_pins_preserve_seeded_defaults_and_clear_preinitialization_pins() {
+        let mut rt = ObscuraJsRuntime::new();
+        rt.set_dom(parse_html("<html><body></body></html>"));
+        rt.set_url("http://example.com/test");
+        rt.set_stealth(true);
+        rt.execute_script("fixed-fingerprint-seed", "Date.now = () => 0; Math.random = () => 2 / 0xFFFFFFFF;").unwrap();
+        rt.set_fingerprint_pin(Some((1234, 777)), Some(7), Some(63.5));
+        rt.set_fingerprint_pin(None, None, None);
+        rt.run_page_init();
+        let values = rt.evaluate("[screen.width,screen.height,navigator.hardwareConcurrency,navigator.deviceMemory]").unwrap();
+        assert_eq!(values.as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>(), vec![2560.0,1440.0,16.0,4.0]);
+    }
+
+    #[test]
+    fn fingerprint_pins_reach_frames_without_sharing_mutable_objects() {
+        let mut rt = ObscuraJsRuntime::new();
+        rt.set_dom(parse_html("<html><body></body></html>"));
+        rt.set_url("http://example.com/test");
+        rt.set_stealth(true);
+        rt.set_fingerprint_pin(Some((1234, 777)), Some(7), Some(4.0));
+        rt.run_page_init();
+        let result = rt.evaluate_script(r#"(() => {
+            const a = document.createElement('iframe'); document.body.appendChild(a);
+            const child = a.contentWindow;
+            const initial = [child.screen.width,child.screen.height,child.navigator.hardwareConcurrency,child.navigator.deviceMemory];
+            const separate = [child.__obscura_pin !== globalThis.__obscura_pin, child.__obscura_pin.screen !== globalThis.__obscura_pin.screen, child.__obscura_pin.screen instanceof child.Array];
+            child.__obscura_pin.screen[0] = 999; child.__obscura_pin.hw = 99;
+            const b = document.createElement('iframe'); document.body.appendChild(b);
+            return {initial,separate,parent:[globalThis.__obscura_pin.screen[0],globalThis.__obscura_pin.hw],later:[b.contentWindow.screen.width,b.contentWindow.navigator.hardwareConcurrency]};
+        })()"#).unwrap();
+        let numbers = |key: &str| result[key].as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>();
+        assert_eq!(numbers("initial"), vec![1234.0,777.0,7.0,4.0]);
+        assert_eq!(result["separate"], serde_json::json!([true,true,true]));
+        assert_eq!(numbers("parent"), vec![1234.0,7.0]);
+        assert_eq!(numbers("later"), vec![1234.0,7.0]);
+        assert_eq!(rt.evaluate("[Object.keys(window).includes('__obscura_pin'), Reflect.ownKeys(window).includes('__obscura_copy_fingerprint_pin')]").unwrap(), serde_json::json!([false,false]));
+    }
+
+    #[test]
+    fn explicit_viewport_and_screen_metrics_take_precedence_over_runtime_pin() {
+        let mut rt = ObscuraJsRuntime::new();
+        rt.set_dom(parse_html("<html><body></body></html>"));
+        rt.set_url("http://example.com/test");
+        // The explicit embedding API works without stealth; environment pins
+        // are separately applied only by the stealth browser path.
+        rt.set_fingerprint_pin(Some((1920, 1080)), Some(7), Some(4.0));
+        rt.set_viewport(300.0, 200.0);
+        rt.set_screen_size_override(Some((1440.0, 900.0)), true);
+        rt.run_page_init();
+        let values = rt.evaluate("[screen.width,screen.height,innerWidth,innerHeight,devicePixelRatio,navigator.hardwareConcurrency]").unwrap();
+        assert_eq!(values.as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>(), vec![1440.0,900.0,300.0,200.0,1.0,7.0]);
+        rt.set_screen_size_override(None, false);
+        let values = rt.evaluate("[screen.width,screen.height,innerWidth,innerHeight,devicePixelRatio]").unwrap();
+        assert_eq!(values.as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>(), vec![1920.0,1080.0,300.0,200.0,1.0]);
     }
 
     #[cfg(feature = "render")]
