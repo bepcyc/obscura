@@ -541,7 +541,11 @@ mod tests {
 
     #[test]
     fn initial_frame_adoption_preserves_the_realm_and_inherited_base() {
-        let mut parent = page("https://parent.example/pages/index.html", "<html><body></body></html>");
+        let mut parent = ObscuraJsRuntime::new();
+        parent.set_dom(parse_html("<html><body></body></html>"));
+        parent.set_url("https://parent.example/pages/index.html");
+        parent.set_fingerprint_pin(Some((1234, 777)), Some(7), Some(4.0));
+        parent.run_page_init();
         parent.execute_script("initial-frame", r#"
             globalThis.frameElementProbe = document.createElement('iframe');
             document.body.appendChild(frameElementProbe);
@@ -552,6 +556,8 @@ mod tests {
         let frame = FrameRealm::new(&mut parent, pending.frame_id, pending.parent_frame_id,
             &pending.url, &pending.html).expect("adopt initial realm");
         assert_eq!(frame.origin(), "https://parent.example");
+        let pins = frame.evaluate(&mut parent, "[screen.width,screen.height,navigator.hardwareConcurrency,navigator.deviceMemory]").unwrap();
+        assert_eq!(pins.as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>(), vec![1234.0,777.0,7.0,4.0]);
         assert_eq!(frame.evaluate(&mut parent,
             "[marker, document.body.textContent, document.URL, document.baseURI]").unwrap(),
             serde_json::json!([42, "child", "about:blank", "https://parent.example/pages/index.html"]));
@@ -696,6 +702,7 @@ mod tests {
         let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TestAgent/150.0.0.0";
         let mut parent = ObscuraJsRuntime::new();
         parent.set_user_agent(user_agent);
+        parent.set_fingerprint_pin(Some((1234, 777)), Some(7), Some(4.0));
         parent.set_platform("Win32", "Windows", "19.0.0");
         parent.set_dom(parse_html("<html><body></body></html>"));
         parent.set_url("https://parent.example/");
@@ -721,6 +728,16 @@ mod tests {
                 "frame and parent disagree on {surface}"
             );
         }
+        for (surface, expected) in [("screen.width", 1234.0), ("screen.height", 777.0), ("navigator.hardwareConcurrency", 7.0), ("navigator.deviceMemory", 4.0)] {
+            assert_eq!(frame.evaluate(&mut parent, surface).unwrap().as_f64(), Some(expected), "frame {surface}");
+            assert_eq!(parent.evaluate(surface).unwrap().as_f64(), Some(expected), "parent {surface}");
+        }
+        frame.execute_script(&mut parent, "__obscura_pin.screen[0] = 999; __obscura_pin.hw = 99;").unwrap();
+        let values = parent.evaluate("[__obscura_pin.screen[0],__obscura_pin.hw]").unwrap();
+        assert_eq!(values.as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>(), vec![1234.0,7.0]);
+        let later = FrameRealm::new(&mut parent, 2, 0, "https://child.example/later", "<html><body></body></html>").expect("later frame");
+        let values = later.evaluate(&mut parent, "[screen.width,navigator.hardwareConcurrency]").unwrap();
+        assert_eq!(values.as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>(), vec![1234.0,7.0]);
         assert_eq!(
             frame.evaluate(&mut parent, "navigator.userAgent").unwrap(),
             serde_json::json!(user_agent)
